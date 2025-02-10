@@ -1,0 +1,30 @@
+﻿# Visual Studio-spezifische Dateien
+.vs/
+*.suo
+*.user
+*.cache
+*.sln.docstates
+
+# Build- und Debug-Ordner (befinden sich im Unterordner)
+*/bin/
+*/obj/
+*/Debug/
+*/Release/
+*/TestResults/
+
+# Automatisch generierte Dateien
+*.log
+*.tmp
+*.nupkg
+*.lock.json
+
+# Konfigurationsdateien (optional)
+*.config
+*.csproj.user
+
+# Visual Studio Publish-Profile
+Properties/PublishProfiles/
+ReadMsg/Properties/PublishProfiles/
+# User-spezifische Dateien
+*.user
+*.suo
