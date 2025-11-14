@@ -190,11 +190,13 @@ namespace ReadMsg
 
         private void ProcessEmailContent(string subject, string senderName, string senderEmail, DateTimeOffset? sentOn, string recipients, string bodyHtml, string bodyText, string bodyRtf, IEnumerable<object> attachments)
         {
+            string type = senderEmail.Contains("bc-wb.de") ? "A" : "E";
+
             string sentOnStr = sentOn.HasValue ? sentOn.Value.DateTime.ToString("dddd, d. MMMM yyyy HH:mm") : "Datum unbekannt";
             string recipientsStr = recipients;
             string cleanSubject = CleanFileName(subject);
             string datum = sentOn.HasValue ? sentOn.Value.DateTime.ToString("yyMMdd") : "Datum unbekannt";
-            string defaultFileName = $"{datum}_Email_{cleanSubject}".Replace(" ", "_");
+            string defaultFileName = $"{datum}_Email{type}_{cleanSubject}".Replace(" ", "_");
 
             string folderPath = GetFolderPath();
             if (string.IsNullOrEmpty(folderPath))
@@ -227,11 +229,73 @@ namespace ReadMsg
                 outputPdfPath = Path.Combine(folderPath, pdfFileName);
             }
 
+            // Re-check length after user's choice
+            while (outputPdfPath.Length > 250)
+            {
+                var retryResult = MessageBox.Show(
+                    "Der gewählte Pfad ist weiterhin zu lang (>250 Zeichen).\nMöchten Sie einen anderen Pfad wählen?",
+                    "Pfad zu lang",
+                    MessageBoxButtons.RetryCancel,
+                    MessageBoxIcon.Warning);
+
+                if (retryResult == DialogResult.Retry)
+                {
+                    using (SaveFileDialog retryDialog = new SaveFileDialog())
+                    {
+                        retryDialog.FileName = Path.GetFileName(outputPdfPath);
+                        retryDialog.Filter = "PDF-Datei|*.pdf";
+                        retryDialog.Title = "Wählen Sie einen neuen Speicherort mit kürzerem Pfad";
+                        try
+                        {
+                            retryDialog.InitialDirectory = Directory.Exists(Path.GetDirectoryName(outputPdfPath) ?? string.Empty)
+                                ? Path.GetDirectoryName(outputPdfPath)
+                                : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                        }
+                        catch
+                        {
+                            retryDialog.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                        }
+
+                        if (retryDialog.ShowDialog() == DialogResult.OK)
+                        {
+                            outputPdfPath = retryDialog.FileName;
+
+                            if (attachments.Any())
+                            {
+                                string chosenDir = Path.GetDirectoryName(outputPdfPath) ?? folderPath;
+                                string chosenNameNoExt = Path.GetFileNameWithoutExtension(outputPdfPath);
+                                finalFolderPath = Path.Combine(chosenDir, chosenNameNoExt);
+
+                                if (!Directory.Exists(finalFolderPath))
+                                {
+                                    Directory.CreateDirectory(finalFolderPath);
+                                }
+                            }
+
+                            // Schleife prüft erneut outputPdfPath.Length
+                            continue;
+                        }
+                        else
+                        {
+                            // User cancelled the re-selection -> abort
+                            SetLabel("Abgebrochen!", Color.Red);
+                            return;
+                        }
+                    }
+                }
+                else
+                {
+                    // User chose Cancel -> abort
+                    SetLabel("Abgebrochen!", Color.Red);
+                    return;
+                }
+            }
+
             List<string> attachmentNames = new List<string>();
 
             if (attachments.Any())
             {
-                string attachmentsFolder = Path.Combine(finalFolderPath, "Anh�nge");
+                string attachmentsFolder = Path.Combine(finalFolderPath, "Anhänge");
                 Directory.CreateDirectory(attachmentsFolder);
 
                 foreach (var attachment in attachments)
@@ -271,7 +335,7 @@ namespace ReadMsg
         {
             using (FolderBrowserDialog folderDialog = new FolderBrowserDialog())
             {
-                folderDialog.Description = "W�hlen Sie den Speicherort f�r die Dateien aus";
+                folderDialog.Description = "Wählen Sie den Speicherort für die Dateien aus";
 
                 if (folderDialog.ShowDialog() == DialogResult.OK)
                 {
@@ -289,7 +353,7 @@ namespace ReadMsg
                 {
                     saveDialog.FileName = defaultFileName;
                     saveDialog.Filter = "PDF-Datei|*.pdf";
-                    saveDialog.Title = "Geben Sie einen Namen f�r den Ordner bzw. die PDF-Datei ein";
+                    saveDialog.Title = "Geben Sie einen Namen für den Ordner bzw. die PDF-Datei ein";
 
                     if (saveDialog.ShowDialog() == DialogResult.OK)
                     {
@@ -318,7 +382,7 @@ namespace ReadMsg
 
             if (string.IsNullOrEmpty(bodyContent))
             {
-                bodyContent = "Kein Inhalt verf�gbar.";
+                bodyContent = "Kein Inhalt verfügbar.";
             }
             else if (!bodyContent.TrimStart().StartsWith("<"))
             {
@@ -372,6 +436,11 @@ namespace ReadMsg
         }
 
         private void label2_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void label3_Click(object sender, EventArgs e)
         {
 
         }
