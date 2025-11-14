@@ -205,7 +205,8 @@ namespace ReadMsg
                 return;
             }
 
-            string userFileName = PromptForFileName(defaultFileName);
+            // Pass folderPath and whether there are attachments so PromptForFileName can show the allowed length
+            string userFileName = PromptForFileName(defaultFileName, folderPath, attachments.Any());
             if (string.IsNullOrEmpty(userFileName))
             {
                 SetLabel("Abgebrochen!", Color.Red);
@@ -233,8 +234,8 @@ namespace ReadMsg
             while (outputPdfPath.Length > 250)
             {
                 var retryResult = MessageBox.Show(
-                    "Der gewählte Pfad ist weiterhin zu lang (>250 Zeichen).\nMöchten Sie einen anderen Pfad wählen?",
-                    "Pfad zu lang",
+                    "Der gewählte Pfad ist weiterhin zu lang (>250 Zeichen).\nMöchten Sie einen anderen Ordner oder einen kürzeren Dateinamen wählen?",
+                    "Pfad oder Dateiname zu lang",
                     MessageBoxButtons.RetryCancel,
                     MessageBoxIcon.Warning);
 
@@ -244,12 +245,27 @@ namespace ReadMsg
                     {
                         retryDialog.FileName = Path.GetFileName(outputPdfPath);
                         retryDialog.Filter = "PDF-Datei|*.pdf";
-                        retryDialog.Title = "Wählen Sie einen neuen Speicherort mit kürzerem Pfad";
+
+                        // compute allowed characters for filename based on current directory and attachments
+                        string baseDir = Path.GetDirectoryName(outputPdfPath) ?? folderPath;
+                        int allowedChars;
+                        if (attachments.Any())
+                        {
+                            // 2 * name + separators + ".pdf" -> 2*name + 2 separators + 4 chars
+                            // inequality: baseDir.Length + 1 + name + 1 + name + 4 <= 250 => 2*name <= 250 - baseDir.Length -6
+                            allowedChars = Math.Max(0, (250 - baseDir.Length - 6) / 2);
+                        }
+                        else
+                        {
+                            // baseDir.Length + 1 + name + 4 <= 250 => name <= 250 - baseDir.Length -5
+                            allowedChars = Math.Max(0, 250 - baseDir.Length - 5);
+                        }
+
+                        retryDialog.Title = $"Wählen Sie einen kürzeren Speicherort oder Dateinamen (max. {allowedChars} Zeichen für den Dateinamen)";
+
                         try
                         {
-                            retryDialog.InitialDirectory = Directory.Exists(Path.GetDirectoryName(outputPdfPath) ?? string.Empty)
-                                ? Path.GetDirectoryName(outputPdfPath)
-                                : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                            retryDialog.InitialDirectory = Directory.Exists(baseDir) ? baseDir : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                         }
                         catch
                         {
@@ -345,7 +361,8 @@ namespace ReadMsg
             return null;
         }
 
-        private string PromptForFileName(string defaultFileName)
+        // Modified: include folderPath and attachments flag to compute allowed characters and show in dialog title
+        private string PromptForFileName(string defaultFileName, string folderPath, bool hasAttachments)
         {
             if (defaultFileName.Length > 50)
             {
@@ -353,7 +370,19 @@ namespace ReadMsg
                 {
                     saveDialog.FileName = defaultFileName;
                     saveDialog.Filter = "PDF-Datei|*.pdf";
-                    saveDialog.Title = "Geben Sie einen Namen für den Ordner bzw. die PDF-Datei ein";
+
+                    // compute allowed chars for the filename based on folderPath and attachments
+                    int allowedChars;
+                    if (hasAttachments)
+                    {
+                        allowedChars = Math.Max(0, (250 - folderPath.Length - 6) / 2);
+                    }
+                    else
+                    {
+                        allowedChars = Math.Max(0, 250 - folderPath.Length - 5);
+                    }
+
+                    saveDialog.Title = $"Geben Sie einen Namen für den Ordner bzw. die PDF-Datei ein (max. {allowedChars} Zeichen für den Dateinamen)";
 
                     if (saveDialog.ShowDialog() == DialogResult.OK)
                     {
