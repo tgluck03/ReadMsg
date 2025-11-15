@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.Net;
 using System.IO;
 using System.Windows.Forms; // Notwendig für RichTextBox
+using System.Linq; // Für LINQ-Erweiterungsmethoden wie .Any() und .Select()
 
 namespace ReadMsg
 {
@@ -99,8 +100,6 @@ namespace ReadMsg
             string extension = Path.GetExtension(filePath).ToLower();
             if (extension == ".msg")
             {
-                // Task.Run wird hier nicht benötigt, da Drag & Drop bereits im UI-Thread stattfindet
-                // und createMSG SetLabel aufruft, das InvokeRequired prüft.
                 createMSG();
             }
             else if (extension == ".eml")
@@ -206,133 +205,164 @@ namespace ReadMsg
         private void ProcessEmailContent(string subject, string senderName, string senderEmail, DateTimeOffset? sentOn, string recipients, string bodyHtml, string bodyText, string bodyRtf, IEnumerable<object> attachments)
         {
             string type = senderEmail.Contains("bc-wb.de") ? "A" : "E";
-
             string sentOnStr = sentOn.HasValue ? sentOn.Value.DateTime.ToString("dddd, d. MMMM yyyy HH:mm") : "Datum unbekannt";
-            string recipientsStr = recipients;
             string cleanSubject = CleanFileName(subject);
             string datum = sentOn.HasValue ? sentOn.Value.DateTime.ToString("yyMMdd") : "Datum unbekannt";
             string defaultFileName = $"{datum}_Email{type}_{cleanSubject}".Replace(" ", "_");
 
-            string folderPath = GetFolderPath();
-            if (string.IsNullOrEmpty(folderPath))
-            {
-                SetLabel("Abgebrochen!", Color.Red);
-                return;
-            }
+            string folderPath = null;
+            string userFileName = null;
+            string currentFinalFolderPath = null; // Deklaration hier
+            string currentOutputPdfPath = null;   // Deklaration hier
+            bool needsPathReevaluation = true;
 
-            // Prompt for filename, potentially shortening it if default is too long
-            string userFileName = PromptForFileName(defaultFileName, folderPath, attachments.Any());
-            if (string.IsNullOrEmpty(userFileName))
+            while (needsPathReevaluation)
             {
-                SetLabel("Abgebrochen!", Color.Red);
-                return;
-            }
+                needsPathReevaluation = false;
 
-            // --- Vorläufige Pfade initialisieren (noch NICHT erstellen) ---
-            // Diese Variablen werden in der Schleife angepasst
-            string currentFinalFolderPath; // Der Ordner für die E-Mail (falls Anhänge)
-            string currentOutputPdfPath;   // Der vollständige Pfad zur PDF-Datei
-
-            if (attachments.Any())
-            {
-                currentFinalFolderPath = Path.Combine(folderPath, userFileName);
-                currentOutputPdfPath = Path.Combine(currentFinalFolderPath, $"{userFileName}.pdf");
-            }
-            else
-            {
-                // Wenn keine Anhänge, ist der "finale Ordner" einfach der gewählte Speicherort
-                currentFinalFolderPath = folderPath; // Dies ist der Basisordner, der von GetFolderPath gewählt wurde
-                currentOutputPdfPath = Path.Combine(folderPath, $"{userFileName}.pdf");
-            }
-
-            // --- Pfadlängenprüfung und Benutzerinteraktion ---
-            while (currentOutputPdfPath.Length > 250)
-            {
-                var retryResult = MessageBox.Show(
-                    "Der gewählte Pfad ist weiterhin zu lang (>250 Zeichen).\nMöchten Sie einen anderen Ordner oder einen kürzeren Dateinamen wählen?",
-                    "Pfad oder Dateiname zu lang",
-                    MessageBoxButtons.RetryCancel,
-                    MessageBoxIcon.Warning);
-
-                if (retryResult == DialogResult.Retry)
+                // 1. Basispfad für den Speicherort abrufen oder neu abrufen
+                if (string.IsNullOrEmpty(folderPath)) // Prüfen, ob folderPath noch nicht gesetzt ist oder zurückgesetzt wurde
                 {
-                    using (SaveFileDialog retryDialog = new SaveFileDialog())
+                    folderPath = GetFolderPath();
+                    if (string.IsNullOrEmpty(folderPath)) { SetLabel("Abgebrochen!", Color.Red); return; }
+                }
+
+                // 2. Benutzerdefinierten E-Mail-Ordner-/PDF-Namen abrufen oder neu abrufen
+                // Wenn userFileName null ist (erste Iteration oder zurückgesetzt), wird PromptForFileName aufgerufen.
+                // Ansonsten wird der bestehende userFileName verwendet.
+                userFileName = PromptForFileName(userFileName ?? defaultFileName, folderPath, attachments.Any());
+                if (string.IsNullOrEmpty(userFileName)) { SetLabel("Abgebrochen!", Color.Red); return; }
+
+                // 3. Aktuellen finalen Ordnerpfad und PDF-Ausgabepfad konstruieren
+                if (attachments.Any())
+                {
+                    currentFinalFolderPath = Path.Combine(folderPath, userFileName);
+                    currentOutputPdfPath = Path.Combine(currentFinalFolderPath, $"{userFileName}.pdf");
+                }
+                else
+                {
+                    currentFinalFolderPath = folderPath;
+                    currentOutputPdfPath = Path.Combine(folderPath, $"{userFileName}.pdf");
+                }
+
+                // 4. Pfadlänge der Haupt-PDF-Datei validieren
+                if (currentOutputPdfPath.Length > 250)
+                {
+                    var retryResult = MessageBox.Show(
+                        "Der gewählte Pfad für die E-Mail-PDF ist zu lang (>250 Zeichen).\nMöchten Sie einen anderen Ordner oder einen kürzeren Dateinamen wählen?",
+                        "Pfad oder Dateiname zu lang",
+                        MessageBoxButtons.RetryCancel,
+                        MessageBoxIcon.Warning);
+
+                    if (retryResult == DialogResult.Retry)
                     {
-                        // Der FileName im Dialog sollte immer den Namen der PDF enthalten, auch wenn der Pfad geändert wird
-                        retryDialog.FileName = Path.GetFileName(currentOutputPdfPath);
-                        retryDialog.Filter = "PDF-Datei|*.pdf";
+                        using (SaveFileDialog retryDialog = new SaveFileDialog())
+                        {
+                            retryDialog.FileName = Path.GetFileName(currentOutputPdfPath);
+                            retryDialog.Filter = "PDF-Datei|*.pdf";
 
-                        // Berechne die erlaubten Zeichen für den Dateinamen basierend auf dem aktuellen Verzeichnis und Anhängen
-                        string baseDir = Path.GetDirectoryName(currentOutputPdfPath) ?? folderPath;
-                        int allowedChars;
-                        if (attachments.Any())
-                        {
-                            // Ungleichung: baseDir.Length + 1 (für \) + name + 1 (für \) + name + 4 (.pdf) <= 250
-                            // 2 * name <= 250 - baseDir.Length - 6
-                            allowedChars = Math.Max(0, (250 - baseDir.Length - 6) / 2);
-                        }
-                        else
-                        {
-                            // Ungleichung: baseDir.Length + 1 (für \) + name + 4 (.pdf) <= 250
-                            // name <= 250 - baseDir.Length - 5
-                            allowedChars = Math.Max(0, 250 - baseDir.Length - 5);
-                        }
-                        retryDialog.Title = $"Wählen Sie einen kürzeren Speicherort oder Dateinamen (max. {allowedChars} Zeichen für den Dateinamen)";
-
-                        try
-                        {
-                            retryDialog.InitialDirectory = Directory.Exists(baseDir) ? baseDir : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                        }
-                        catch
-                        {
-                            retryDialog.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                        }
-
-                        if (retryDialog.ShowDialog() == DialogResult.OK)
-                        {
-                            // NEUE LOGIK HIER:
-                            // Extrahiere den vom Benutzer gewählten BASIS-Ordner und den DATEINAMEN aus der Eingabe
-                            string chosenBaseDirectory = Path.GetDirectoryName(retryDialog.FileName) ?? folderPath; // Der Ordner, in dem der E-Mail-Containerordner liegen soll
-                            string chosenEmailName = Path.GetFileNameWithoutExtension(retryDialog.FileName); // Der Name für den E-Mail-Containerordner und die PDF
-
-                            if (attachments.Any())
+                            string initialDirectoryForDialog;
+                            try
                             {
-                                // Wenn Anhänge vorhanden sind, wird der E-Mail-Containerordner erstellt
-                                currentFinalFolderPath = Path.Combine(chosenBaseDirectory, chosenEmailName);
-                                // Die PDF wird INNERHALB dieses Containerordners gespeichert
-                                currentOutputPdfPath = Path.Combine(currentFinalFolderPath, $"{chosenEmailName}.pdf");
+                                initialDirectoryForDialog = Path.GetDirectoryName(currentOutputPdfPath);
+                                if (!Directory.Exists(initialDirectoryForDialog))
+                                {
+                                    initialDirectoryForDialog = folderPath;
+                                }
+                            }
+                            catch { initialDirectoryForDialog = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments); }
+                            retryDialog.InitialDirectory = initialDirectoryForDialog;
+
+                            int currentAllowedChars = CalculateAllowedChars(initialDirectoryForDialog, attachments.Any());
+
+                            if (currentAllowedChars == 0)
+                            {
+                                retryDialog.Title = "Der Startordner ist bereits zu lang. Bitte wählen Sie einen DEUTLICH kürzeren Speicherort.";
                             }
                             else
                             {
-                                // Wenn keine Anhänge, wird die PDF direkt im gewählten Basisordner gespeichert
-                                currentFinalFolderPath = chosenBaseDirectory; // Kein separater Containerordner
-                                currentOutputPdfPath = Path.Combine(chosenBaseDirectory, $"{chosenEmailName}.pdf");
+                                retryDialog.Title = $"Wählen Sie einen kürzeren Speicherort oder Dateinamen (max. {currentAllowedChars} Zeichen für den Dateinamen)";
                             }
-                            continue; // Schleife erneut durchlaufen, um die Länge zu prüfen
+
+                            if (retryDialog.ShowDialog() == DialogResult.OK)
+                            {
+                                folderPath = Path.GetDirectoryName(retryDialog.FileName) ?? folderPath; // Update folderPath
+                                userFileName = Path.GetFileNameWithoutExtension(retryDialog.FileName); // Update userFileName
+                                needsPathReevaluation = true; // Hauptschleife neu starten, um alles neu zu validieren
+                                continue;
+                            }
+                            else
+                            {
+                                SetLabel("Abgebrochen!", Color.Red); return;
+                            }
                         }
-                        else
+                    }
+                    else
+                    {
+                        SetLabel("Abgebrochen!", Color.Red); return;
+                    }
+                }
+
+                // 5. Anhangspfade validieren (nur wenn Anhänge vorhanden sind)
+                if (attachments.Any())
+                {
+                    string attachmentsBaseFolder = Path.Combine(currentFinalFolderPath, "Anhänge");
+                    List<string> longAttachmentFileNames = new List<string>();
+
+                    foreach (var attachment in attachments)
+                    {
+                        string attachmentFileName = "";
+                        if (attachment is Storage.Attachment msgAtt)
                         {
-                            // Benutzer hat die erneute Auswahl abgebrochen -> Vorgang abbrechen
+                            attachmentFileName = msgAtt.FileName;
+                        }
+                        else if (attachment is AttachmentWrapper emlAtt)
+                        {
+                            attachmentFileName = emlAtt.FileName;
+                        }
+                        // Wenn attachmentFileName immer noch leer ist (unerwarteter Typ), überspringen.
+                        if (string.IsNullOrEmpty(attachmentFileName)) continue;
+
+                        string fullAttachmentPath = Path.Combine(attachmentsBaseFolder, attachmentFileName);
+
+                        if (fullAttachmentPath.Length > 250)
+                        {
+                            longAttachmentFileNames.Add(attachmentFileName);
+                        }
+                    }
+
+                    if (longAttachmentFileNames.Any())
+                    {
+                        string message = $"Die Pfade für folgende Anhänge sind zu lang (>250 Zeichen):\n\n" +
+                                         $"{string.Join("\n", longAttachmentFileNames.Select(n => $" - {n}"))}\n\n" +
+                                         "Möchten Sie trotzdem fortfahren?\n\n" +
+                                         "(Wenn Sie fortfahren, könnten Anhänge nicht korrekt angezeigt werden.)";
+
+                        var attachmentPathResult = MessageBox.Show(message,
+                                                                   "Anhangspfad zu lang",
+                                                                   MessageBoxButtons.YesNoCancel,
+                                                                   MessageBoxIcon.Warning);
+
+                        if (attachmentPathResult == DialogResult.No)
+                        {
+                            folderPath = null; // Basispfad-Auswahl erzwingen
+                            userFileName = null; // E-Mail-Namen-Auswahl erzwingen
+                            needsPathReevaluation = true; // Hauptschleife neu starten
+                            continue;
+                        }
+                        else if (attachmentPathResult == DialogResult.Cancel)
+                        {
                             SetLabel("Abgebrochen!", Color.Red);
                             return;
                         }
                     }
                 }
-                else
-                {
-                    // Benutzer hat die erste Warnung abgebrochen -> Vorgang abbrechen
-                    SetLabel("Abgebrochen!", Color.Red);
-                    return;
-                }
-            }
+            } // Ende der while (needsPathReevaluation)-Schleife
 
             // --- HIER beginnt die tatsächliche Dateisystem-Operation ---
-            // Wenn wir hier ankommen, ist der Pfad gültig und der Benutzer hat nicht abgebrochen.
-
             List<string> attachmentNames = new List<string>();
 
             // 1. Hauptordner für die E-Mail erstellen (nur wenn Anhänge vorhanden)
-            // Dieser Schritt wird nur ausgeführt, wenn es Anhänge gibt und der Pfad validiert wurde.
             if (attachments.Any())
             {
                 if (!Directory.Exists(currentFinalFolderPath))
@@ -345,26 +375,44 @@ namespace ReadMsg
             if (attachments.Any())
             {
                 string attachmentsFolder = Path.Combine(currentFinalFolderPath, "Anhänge");
-                Directory.CreateDirectory(attachmentsFolder); // Stellt sicher, dass sowohl currentFinalFolderPath als auch attachmentsFolder existieren
+                Directory.CreateDirectory(attachmentsFolder);
 
                 foreach (var attachment in attachments)
                 {
                     try
                     {
-                        if (attachment is Storage.Attachment msgAttachment)
+                        string attachmentFileName = "";
+                        if (attachment is Storage.Attachment msgAtt)
                         {
-                            string attachmentFilePath = Path.Combine(attachmentsFolder, msgAttachment.FileName);
-                            File.WriteAllBytes(attachmentFilePath, msgAttachment.Data);
-                            attachmentNames.Add(msgAttachment.FileName);
+                            attachmentFileName = msgAtt.FileName;
                         }
-                        else if (attachment is AttachmentWrapper emlAttachment)
+                        else if (attachment is AttachmentWrapper emlAtt)
                         {
-                            string attachmentFilePath = Path.Combine(attachmentsFolder, emlAttachment.FileName);
+                            attachmentFileName = emlAtt.FileName;
+                        }
+                        if (string.IsNullOrEmpty(attachmentFileName)) continue;
+
+                        string attachmentFilePath = Path.Combine(attachmentsFolder, attachmentFileName);
+
+                        //// Erneute Pfadlängenprüfung vor dem Speichern, falls der Benutzer "Trotzdem fortfahren" gewählt hat
+                        //if (attachmentFilePath.Length > 250)
+                        //{
+                        //    MessageBox.Show($"Der Pfad für den Anhang '{attachmentFileName}' ist immer noch zu lang ({attachmentFilePath.Length} Zeichen > 250). Das Speichern könnte fehlschlagen.",
+                        //                    "Warnung: Anhangspfad zu lang", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        //}
+
+                        if (attachment is Storage.Attachment msgAttToSave)
+                        {
+                            File.WriteAllBytes(attachmentFilePath, msgAttToSave.Data);
+                            attachmentNames.Add(msgAttToSave.FileName);
+                        }
+                        else if (attachment is AttachmentWrapper emlAttToSave)
+                        {
                             using (var stream = File.Create(attachmentFilePath))
                             {
-                                emlAttachment.MimePart.Content.DecodeTo(stream);
+                                emlAttToSave.MimePart.Content.DecodeTo(stream);
                             }
-                            attachmentNames.Add(emlAttachment.FileName);
+                            attachmentNames.Add(emlAttToSave.FileName);
                         }
                     }
                     catch (Exception ex)
@@ -378,7 +426,7 @@ namespace ReadMsg
             // 3. PDF erstellen
             try
             {
-                AddBodyToPdf(bodyHtml, bodyText, bodyRtf, senderName, sentOnStr, recipientsStr, subject, senderEmail, currentOutputPdfPath, attaches);
+                AddBodyToPdf(bodyHtml, bodyText, bodyRtf, senderName, sentOnStr, recipients, subject, senderEmail, currentOutputPdfPath, attaches);
                 SetLabel("Abgeschlossen!", Color.LimeGreen);
             }
             catch (Exception ex)
@@ -390,8 +438,6 @@ namespace ReadMsg
 
         private string ConvertRtfToText(string rtf)
         {
-            // Verwendet System.Windows.Forms.RichTextBox für die RTF-Konvertierung
-            // Stelle sicher, dass dein Projekt eine Referenz auf System.Windows.Forms hat.
             using (var rtb = new RichTextBox())
             {
                 try
@@ -401,7 +447,6 @@ namespace ReadMsg
                 }
                 catch (ArgumentException)
                 {
-                    // Behandle Fälle, in denen der RTF-String ungültig ist
                     return "RTF-Inhalt konnte nicht gelesen werden.";
                 }
             }
@@ -412,7 +457,7 @@ namespace ReadMsg
             using (FolderBrowserDialog folderDialog = new FolderBrowserDialog())
             {
                 folderDialog.Description = "Wählen Sie den Speicherort für die Dateien aus";
-                folderDialog.ShowNewFolderButton = true; // Ermöglicht das Erstellen neuer Ordner direkt im Dialog
+                folderDialog.ShowNewFolderButton = true;
 
                 if (folderDialog.ShowDialog() == DialogResult.OK)
                 {
@@ -422,46 +467,73 @@ namespace ReadMsg
             return null;
         }
 
+        // Hilfsmethode zur Berechnung der erlaubten Zeichen für den E-Mail-Ordner-/PDF-Namen
+        private int CalculateAllowedChars(string basePath, bool hasAttachments)
+        {
+            if (string.IsNullOrEmpty(basePath)) return 0;
+
+            if (hasAttachments)
+            {
+                // Voller Pfad wird sein: basePath + "\" + userFileName (Ordner) + "\" + userFileName (PDF) + ".pdf"
+                // Benötigt: basePath.Length + 1 + userFileName.Length + 1 + userFileName.Length + 4 <= 250
+                // Vereinfacht: 2 * userFileName.Length <= 250 - basePath.Length - 6
+                return Math.Max(0, (250 - basePath.Length - 6) / 2);
+            }
+            else
+            {
+                // Voller Pfad wird sein: basePath + "\" + userFileName (PDF) + ".pdf"
+                // Benötigt: basePath.Length + 1 + userFileName.Length + 4 <= 250
+                // Vereinfacht: userFileName.Length <= 250 - basePath.Length - 5
+                return Math.Max(0, 250 - basePath.Length - 5);
+            }
+        }
+
         private string PromptForFileName(string defaultFileName, string folderPath, bool hasAttachments)
         {
-            // Berechne die maximal erlaubten Zeichen für den Dateinamen-Teil
-            int allowedChars;
-            if (hasAttachments)
+            int allowedChars = CalculateAllowedChars(folderPath, hasAttachments);
+
+            string dialogTitle;
+            if (allowedChars == 0)
             {
-                // Pfadstruktur: folderPath + "\" + userFileName (Ordner) + "\" + userFileName (PDF) + ".pdf"
-                // Länge: folderPath.Length + 1 + userFileName.Length + 1 + userFileName.Length + 4
-                // 2 * userFileName.Length <= 250 - folderPath.Length - 6
-                allowedChars = Math.Max(0, (250 - folderPath.Length - 6) / 2);
+                dialogTitle = "Der gewählte Ordnerpfad ist bereits zu lang. Bitte wählen Sie einen DEUTLICH kürzeren Speicherort.";
             }
             else
             {
-                // Pfadstruktur: folderPath + "\" + userFileName (PDF) + ".pdf"
-                // Länge: folderPath.Length + 1 + userFileName.Length + 4
-                // userFileName.Length <= 250 - folderPath.Length - 5
-                allowedChars = Math.Max(0, 250 - folderPath.Length - 5);
+                dialogTitle = $"Geben Sie einen Namen für den Ordner bzw. die PDF-Datei ein (max. {allowedChars} Zeichen für den Dateinamen)";
             }
 
-            // Prüfe, ob der Standard-Dateiname bereits zu lang für den erlaubten Bereich ist ODER
-            // ob der vollständige Standardpfad (mit Standard-Dateinamen) 250 Zeichen überschreiten würde.
-            bool defaultPathTooLong = false;
+            bool defaultFileNameTooLong = defaultFileName.Length > allowedChars;
+            bool defaultFullPathTooLong = false;
+
+            string tempFullPath;
             if (hasAttachments)
             {
-                defaultPathTooLong = (folderPath.Length + 1 + defaultFileName.Length + 1 + defaultFileName.Length + 4) > 250;
+                tempFullPath = Path.Combine(folderPath, defaultFileName, $"{defaultFileName}.pdf");
             }
             else
             {
-                defaultPathTooLong = (folderPath.Length + 1 + defaultFileName.Length + 4) > 250;
+                tempFullPath = Path.Combine(folderPath, $"{defaultFileName}.pdf");
             }
+            defaultFullPathTooLong = tempFullPath.Length > 250;
 
-
-            if (defaultFileName.Length > allowedChars || defaultPathTooLong)
+            // Der Dialog soll nur erscheinen, wenn der Standardname zu lang ist oder wenn allowedChars 0 ist
+            // In diesem Fall, wenn allowedChars 0 ist, wird der Titel die entsprechende Meldung anzeigen.
+            if (defaultFileNameTooLong || defaultFullPathTooLong || allowedChars == 0)
             {
                 using (SaveFileDialog saveDialog = new SaveFileDialog())
                 {
                     saveDialog.FileName = defaultFileName;
-                    saveDialog.Filter = "PDF-Datei|*.pdf"; // Filter ist für die PDF, aber der Name ist für den Ordner/die Datei
+                    saveDialog.Filter = "PDF-Datei|*.pdf";
+                    saveDialog.Title = dialogTitle;
 
-                    saveDialog.Title = $"Geben Sie einen Namen für den Ordner bzw. die PDF-Datei ein (max. {allowedChars} Zeichen für den Dateinamen)";
+                    try
+                    {
+                        saveDialog.InitialDirectory = Directory.Exists(folderPath) ? folderPath : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                    }
+                    catch
+                    {
+                        saveDialog.InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                    }
 
                     if (saveDialog.ShowDialog() == DialogResult.OK)
                     {
@@ -492,7 +564,6 @@ namespace ReadMsg
             {
                 bodyContent = "Kein Inhalt verfügbar.";
             }
-            // Prüfe, ob es bereits HTML ist. Wenn nicht, HTML-kodieren und in <pre> einpacken.
             else if (!bodyContent.TrimStart().StartsWith("<") && !bodyContent.TrimStart().StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase))
             {
                 bodyContent = "<pre>" + WebUtility.HtmlEncode(bodyContent) + "</pre>";
@@ -548,18 +619,14 @@ namespace ReadMsg
 
         private string CleanFileName(string fileName)
         {
-            if (string.IsNullOrEmpty(fileName)) return "Unbenannt"; // Behandle null oder leere Betreffzeilen
+            if (string.IsNullOrEmpty(fileName)) return "Unbenannt";
 
-            // Ungültige Zeichen durch Unterstrich ersetzen
             foreach (char c in Path.GetInvalidFileNameChars())
             {
                 fileName = fileName.Replace(c, '_');
             }
-            // Ersetze auch Zeichen, die oft in Pfaden/Dateinamen problematisch sind, wie ':' '/' '\'
             fileName = fileName.Replace(':', '_').Replace('/', '_').Replace('\\', '_').Replace('|', '_').Replace('*', '_').Replace('?', '_').Replace('"', '_').Replace('<', '_').Replace('>', '_');
-            // Führende/nachfolgende Leerzeichen oder Unterstriche entfernen
             fileName = fileName.Trim('_', ' ');
-            // Sicherstellen, dass es nach der Bereinigung nicht leer ist
             if (string.IsNullOrEmpty(fileName)) return "Unbenannt";
             return fileName;
         }
